@@ -2,7 +2,7 @@
 set -x
 
 export CUDA_DEVICE_ORDER="PCI_BUS_ID"
-export TRANSFORMERS_CACHE=/root/.cache/huggingface
+# export TRANSFORMERS_CACHE=/root/.cache/huggingface
 
 port=$(shuf -i25000-30000 -n1)
  
@@ -12,7 +12,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 deepspeed --master_port $port src/run_uie_l
    --do_train \
    --do_predict \
    --predict_with_generate \
-   --model_name_or_path initial_model/t5-large \
+   --model_name_or_path t5-large \
    --data_dir CL_Benchmark \
    --task_config_dir configs/order1_configs/dbpedia \
    --instruction_file configs/instruction_config.json \

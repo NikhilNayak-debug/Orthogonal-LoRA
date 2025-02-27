@@ -53,6 +53,24 @@ from uie_trainer_lora import UIETrainer, DenserEvalCallback, skip_instructions
 from compute_metrics import compute_metrics, compute_grouped_metrics
 from model.llama import LlamaForCausalLM_with_lossmask
 
+# from datasets import load_dataset_builder
+
+# import debugpy
+
+# # Get local rank (for distributed training)
+# local_rank = int(os.getenv("LOCAL_RANK", 0))
+
+# # Assign a unique port for each GPU process
+# base_port = 5678  # Base port
+# debug_port = base_port + local_rank  # Unique port for each process
+
+# # Only wait for debugger on rank 0 to avoid blocking all workers
+# # if local_rank == 0:
+# # Use unique debug port for each process
+# debugpy.listen(("0.0.0.0", debug_port))
+# print("Waiting for debugger to attach...")
+# debugpy.wait_for_client()
+
 # off wandb
 os.environ['WANDB_DISABLED'] = "True"
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'

@@ -53,22 +53,25 @@ from uie_trainer_lora import UIETrainer, DenserEvalCallback, skip_instructions
 from compute_metrics import compute_metrics, compute_grouped_metrics
 from model.llama import LlamaForCausalLM_with_lossmask
 
-# from datasets import load_dataset_builder
-# import debugpy
+from torch.utils.data import DataLoader, Dataset
+import torch
+from tqdm import tqdm
+import copy
+from datasets import load_dataset_builder
+import debugpy
+from transformers import T5ForConditionalGeneration
 
 # # Get local rank (for distributed training)
 # local_rank = int(os.getenv("LOCAL_RANK", 0))
-
 # # Assign a unique port for each GPU process
 # base_port = 5678  # Base port
 # debug_port = base_port + local_rank  # Unique port for each process
-
 # # Only wait for debugger on rank 0 to avoid blocking all workers
-# # if local_rank == 0:
-# # Use unique debug port for each process
-# debugpy.listen(("0.0.0.0", debug_port))
-# print("Waiting for debugger to attach...")
-# debugpy.wait_for_client()
+# if local_rank == 0:
+#     # Use unique debug port for each process
+#     debugpy.listen(("0.0.0.0", debug_port))
+#     print("Waiting for debugger to attach...")
+#     debugpy.wait_for_client()
 
 # off wandb
 os.environ['WANDB_DISABLED'] = "True"
@@ -257,6 +260,90 @@ class UIETrainingArguments(Seq2SeqTrainingArguments):
     lamda_1: float = field(default = 0.5)
     lamda_2: float = field(default = 0)
 
+###################################################
+# 1. Define a PyTorch Dataset for DBpedia
+###################################################
+class DBpediaDataset(Dataset):
+    """
+    PyTorch dataset wrapper for the DBpedia dataset.
+    Each example is converted to a text-to-text format.
+    """
+    def __init__(self, json_file, tokenizer):
+        """
+        hf_dataset: the Hugging Face dataset loaded via load_dataset("dbpedia_14")
+        split: "train" or "test"
+        tokenizer: a T5Tokenizer instance
+        label_mapping: a dict mapping integer labels to string labels, e.g. {0:"Company", ...}
+        """
+        self.tokenizer = tokenizer
+
+        # Load data from JSON file
+        with open(json_file, "r", encoding="utf-8") as f:
+            self.dataset = json.load(f)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        # Get the sample
+        sample = self.dataset[idx]
+        input_text = (
+            "What is the topic of the following paragraph? Choose from [Company, Educational Institution, Artist, "
+            "Athlete, Office Holder, Mean of Transportation, Building, Natural Place, Village, Animal, Plant, "
+            "Album, Film, Written Work]. "
+            + sample["sentence"]
+        )
+        target_text = sample["label"]  # Keep the label as a string
+        return input_text, target_text
+
+
+###################################################
+# 2. Collate Function
+###################################################
+def collate_fn(batch, tokenizer, max_source_length=512, max_target_length=16):
+    """
+    Tokenize the batch of input and target texts.
+    """
+    inputs, targets = zip(*batch)
+    input_encodings = tokenizer(list(inputs), padding=True, truncation=True, max_length=max_source_length, return_tensors="pt")
+    target_encodings = tokenizer(list(targets), padding=True, truncation=True, max_length=max_target_length, return_tensors="pt")
+
+    input_encodings["labels"] = target_encodings["input_ids"]
+    return input_encodings
+
+def evaluate(model, tokenizer, test_loader):
+    """
+    Evaluate the fine-tuned model on the test set.
+    """
+    model.eval()
+    correct = 0
+    total = 0
+    sample_count = 0
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Evaluating", unit="batch"):
+            # 🚨 Move the batch to the same device as the model
+            batch = {key: val.to(model.device) for key, val in batch.items()}
+            # Generate predictions
+            generated_ids = model.generate(batch["input_ids"],
+                                           attention_mask=batch["attention_mask"],
+                                           max_length=16)
+            predictions = [tokenizer.decode(g, skip_special_tokens=True).strip() for g in generated_ids]
+            # Decode the ground truth labels
+            targets = [tokenizer.decode(t, skip_special_tokens=True).strip() for t in batch["labels"]]
+
+            for pred, target in zip(predictions, targets):
+                if pred.lower() == target.lower():
+                    correct += 1
+                total += 1
+                # Print only the first 10 examples
+                if sample_count < 5:
+                    print(f"Target: {target} | Prediction: {pred}")
+                    sample_count += 1
+
+    accuracy = correct / total if total > 0 else 0.0
+    print(f"Test Accuracy: {accuracy*100:.2f}%")
+    return accuracy
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -547,6 +634,22 @@ def main():
         trainer.model.save_pretrained(peft_model_id)  
         tokenizer.save_pretrained(peft_model_id)
 
+        # # Merge and unload LoRA adapters
+        # merged_model = trainer.model.merge_and_unload()
+
+        # # Save the merged model and tokenizer in the same directory
+        # merged_model.save_pretrained(training_args.output_dir)
+        # trainer.tokenizer.save_pretrained(training_args.output_dir)
+
+        # print(f"Merged model saved in: {training_args.output_dir}")
+
+        # # Make a deep copy of the model before merging
+        # original_model = copy.deepcopy(trainer.model)
+
+        # # 🚨 Merge LoRA adapters into the base model
+        # print("Merging LoRA adapters into base model before evaluation...")
+        # merged_model = trainer.model.merge_and_unload()  # Merge LoRA weights into base model
+
         metrics = train_result.metrics
         max_train_samples = (
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
@@ -558,6 +661,23 @@ def main():
         trainer.save_state()
         logger.info(f"Metrics {metrics}")
         all_metrics.update(metrics)
+    
+    # # 🚨 Directly Evaluate on DBpedia Without Saving/Loading
+    # print("\nEvaluating the trained model on DBpedia...\n")
+
+    # # Define the test dataset path
+    # test_json_path = "/workspace/O-LoRA/CL_Benchmark/TC/dbpedia/test.json"
+
+    # # Load DBpedia test dataset
+    # test_dataset = DBpediaDataset(test_json_path, tokenizer)
+    # test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False,
+    #                          collate_fn=lambda batch: collate_fn(batch, tokenizer))
+
+    # # Run evaluation on DBpedia
+    # evaluate(merged_model, tokenizer, test_loader)
+
+    # # Restore the original model (undo merge_and_unload)
+    # trainer.model = original_model.to(trainer.model.device)
 
     # Evaluation
     results = {}
